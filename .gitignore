@@ -1,0 +1,7 @@
+# personal / machine-local
+.claude/settings.local.json
+.sfdx/
+.cursor/
+.vscode/
+*.bak
+api-token.json
