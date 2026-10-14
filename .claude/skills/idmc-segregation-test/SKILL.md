@@ -19,14 +19,24 @@ matches the request; if it's unclear, ask.
 Creates four things for an entity `<E>` in the **target org**. The org isn't fixed:
 it is the org of the tokens. The REST API token (`orgId` in `~/.idmc/api-token.json`)
 drives the script, and the MCP token (its `org_id` claim) drives the `usermanagement`
-tools. Both must point to the same org (see step 2).
+tools. When both are usable they must point to the same org (see step 2).
 
 | # | Asset | Name | Created via |
 |---|---|---|---|
 | 1 | User group, role Governance Administrator | `Test-UG-<E>` | REST (`idmc-segment.mjs`) |
 | 2 | Asset group at the root level, published | `<E>` | REST (`idmc-segment.mjs`) |
 | 3 | User group policy, user group 1 + asset group 2 on all 5 rules, published + enabled | `Test-UGP-<E>` | REST (`idmc-segment.mjs`) |
-| 4 | User in user group 1 | `Test-U-<E>` | `usermanagement` MCP `create_user` |
+| 4 | User in user group 1 | `Test-U-<E>` | `usermanagement` MCP `create_user`; **REST fallback** (`idmc-segment.mjs create --email=`) |
+
+**User path.** Asset 4 (create, look up, delete) goes through the `usermanagement` MCP
+by default. Use the **REST path** instead (the v3 users API in `idmc-segment.mjs`, with the
+REST API token) when any of these is true:
+- `check` exits 5: the MCP token is missing, expired or rejected;
+- the `mcp__usermanagement__*` tools aren't available in this session (server failed to connect);
+- an MCP user call fails with 401 / `AUTH_HEADER_REJECTED` / "Exception encountered while processing JWT".
+
+Don't stop to refresh the MCP token in these cases; say in the plan that the user goes via
+REST and why. (The user can still choose to refresh the MCP token instead.)
 
 User fields: First Name `GovAdmin`, Last Name `<E>`, Job Title `Segregation Test Account`,
 Phone `+0123456789`, E-Mail `<email>`.
@@ -50,8 +60,9 @@ This makes a live call with each token. It prints one line per token, then an
 | Exit | Meaning | What to do |
 |---|---|---|
 | 0 | Both valid, `ORG: MATCH` | Use that org. **Don't ask** the user about the org; just state it (name + ID) in the plan. |
-| 3 | At least one token is invalid | Refresh it (below). The `ORG:` line shows which org each token belongs to, so refresh into the right one. |
+| 3 | The REST API token is invalid (the MCP token may be too) | Refresh the REST API token (below). The `ORG:` line shows which org each token belongs to, so refresh into the right one. |
 | 4 | Both valid, `ORG: MISMATCH`: the orgs differ, or one token has no org | Ask the user to confirm the target org (below). |
+| 5 | REST API token valid, MCP token missing/invalid, `ORG: REST ONLY` | Use the REST API token's org and the **REST user path**. Don't ask about the org; state it in the plan. |
 
 **Org confirmation (exit 4 only).** AskUserQuestion: "The REST API token is for org
 `<name>` (`<id>`) but the MCP token is for org `<id>`. Which org should the test
@@ -73,15 +84,17 @@ Refreshes:
   ```
   Or offer the password method, `cmd //c start "" refresh-token-api-native.cmd`.
   An expired JWT alone is fine; the script gets a new one while the IDMC session is alive.
-- **MCP token** (`usermanagement` in `~/.claude.json`, used for asset 4) is INVALID:
+- **MCP token** (`usermanagement` in `~/.claude.json`, used for asset 4) is INVALID: no
+  refresh needed, use the REST user path. Only if the user asks to use the MCP anyway:
   open `cmd //c start "IDMC MCP OAuth refresh" refresh-token-mcp-oauth20.cmd`.
   The user enters the client_id/secret of the target org's OAuth client in that window,
   then runs `/mcp` → reconnect `usermanagement`.
-- Even when the check passes, the `mcp__usermanagement__*` tools must be available
-  in this session. If they aren't, ask the user to reconnect `usermanagement` with `/mcp`.
+- Even when the check passes (exit 0), the `mcp__usermanagement__*` tools must be available
+  in this session. If they aren't, use the REST user path.
 
 Never put a user-login JWT into `.claude.json` (see the `refresh-idmc-token` skill).
-Re-run `check` after any refresh, and continue only on exit 0 (both VALID, `ORG: MATCH`).
+Re-run `check` after any refresh, and continue only on exit 0 (both VALID, `ORG: MATCH`)
+or exit 5 (REST API token VALID, `ORG: REST ONLY`, REST user path).
 `IDMC_ORG_ID=<id>` is optional: it pins the script to one org and rejects a REST API
 token from any other org. You don't need it in normal use.
 
@@ -92,13 +105,15 @@ node idmc-segment.mjs plan "<E>"
 ```
 Check what already exists:
 - `node idmc-segment.mjs delete "<E>"` is a **dry run only**; never add `--yes` here.
-  It lists the existing user group, asset group and policy.
-- `mcp__usermanagement__get_user_details` with `q: "userName==Test-U-<E>"` finds an existing user.
+  It lists the existing user group, asset group and policy, and also the user `Test-U-<E>`
+  (looked up via REST), so on the REST user path this is the only check needed.
+- MCP user path: `mcp__usermanagement__get_user_details` with `q: "userName==Test-U-<E>"` finds an existing user.
 
-Then show the target org (name + ID, from the `ORG: MATCH` line) and a table of the 4 assets: name, description, and what is
+Then show the target org (name + ID, from the `ORG:` line) and a table of the 4 assets: name, description, and what is
 enabled (user group role; asset group Published; policy Published + Enabled with
 the 5 rules below; user with its fields and email). Mark anything that already
-exists as **reused**, because create skips it. Mention the activation email to `<email>`.
+exists as **reused**, because create skips it. Say which path creates the user (MCP, or
+REST and why). Mention the activation email to `<email>`.
 Ask the user to confirm (AskUserQuestion: Create / Cancel). **Do not create anything
 without an explicit yes.**
 
@@ -110,14 +125,17 @@ Policy rules, each with the condition `core.groups == <asset group id>`, hierarc
 5. Attribute group `unpublished-changes`: read, update
 
 ## Step 4: create
-1. Assets 1–3:
+1. Assets 1–3 (MCP user path), or assets 1–4 (REST user path, add `--email`):
    ```
    node idmc-segment.mjs create "<E>"
+   node idmc-segment.mjs create "<E>" --email="<email>"
    ```
    This takes about 1–2 minutes, since the policy publish and enable steps are async jobs.
-   It prints a JSON summary; keep `userGroup.id`. Fail-safe: if it errors, report the
-   error and stop; the run can be repeated safely, because existing pieces are reused.
-2. Asset 4, with `mcp__usermanagement__create_user`:
+   It prints a JSON summary; keep `userGroup.id` (and `user.id` on the REST path). Fail-safe: if it errors, report the
+   error and stop; the run can be repeated safely, because existing pieces are reused
+   (an existing user is added to the user group if needed).
+   On the REST path, skip to 3.
+2. MCP user path only. Asset 4, with `mcp__usermanagement__create_user`:
    `name: "Test-U-<E>"`, `firstName: "GovAdmin"`, `lastName: "<E>"`,
    `title: "Segregation Test Account"`, `phone: "+0123456789"`, `email: "<email>"`,
    `groups: ["<userGroup.id>"]`. This takes the group **ID**, not the name; leave out the password.
@@ -125,7 +143,11 @@ Policy rules, each with the condition `core.groups == <asset group id>`, hierarc
    (`add_groups_to_user` takes group **names**).
    The API accepted the spaces in `lastName: "Dummy 2"` and user names without an `@`.
    If IDMC rejects a name, report the error and ask before changing it.
-3. Check the result: `get_user_group_details` with `q: "userGroupId==<id>"` should list `Test-U-<E>` under `users`.
+   If the call fails with an auth error (401 / `AUTH_HEADER_REJECTED`), switch to the REST
+   path: re-run step 1 with `--email="<email>"` (assets 1–3 are reused).
+3. Check the result. MCP: `get_user_group_details` with `q: "userGroupId==<id>"` should list
+   `Test-U-<E>` under `users`. REST: `node idmc-segment.mjs delete "<E>" --only=user,userGroup`
+   (dry run) should list the user and show the user group with 1 member.
 
 ## Step 5: summary
 State the org (name + ID). Report a table with each asset's name, ID or reference (user group ID, asset group
@@ -141,13 +163,14 @@ still has members.
 
 ### D1: inputs and tokens
 - Ask for the entity name `<E>` if it wasn't given. No email is needed.
-- Run step 2 (`node idmc-segment.mjs check`), with the same rules: refresh any invalid
-  token, and ask for the org only on exit 4. Deletes happen in the org of the tokens.
+- Run step 2 (`node idmc-segment.mjs check`), with the same rules: refresh an invalid
+  REST API token, ask for the org only on exit 4, and pick the user path (MCP, or REST on
+  exit 5 / tools unavailable). Deletes happen in the org of the tokens.
 
 ### D2: show what will be deleted and ask for confirmation
 - `node idmc-segment.mjs delete "<E>"` is a dry run. It lists the policy `Test-UGP-<E>`,
-  the asset group `<E>` and the user group `Test-UG-<E>`, with its members.
-- `mcp__usermanagement__get_user_details` with `q: "userName==Test-U-<E>"` finds the user and its ID.
+  the asset group `<E>`, the user `Test-U-<E>` and the user group `Test-UG-<E>`, with its members.
+- MCP user path: `mcp__usermanagement__get_user_details` with `q: "userName==Test-U-<E>"` finds the user and its ID.
 
 State the org (name + ID), then show a table in delete order (the 4 items with their IDs or references). Mark missing
 items as "not found, skipped". If the user group has members **other than**
@@ -157,12 +180,20 @@ explicit confirmation (AskUserQuestion: Delete / Cancel). If nothing exists, say
 
 ### D3: delete, one step at a time
 Stop at the first failure and report what was already deleted.
+
+**REST user path:** one command deletes all 4 in order (policy → asset group → user → user group):
+```
+node idmc-segment.mjs delete "<E>" --yes
+```
+
+**MCP user path:**
 1. **Policy and asset group** (REST):
    ```
    node idmc-segment.mjs delete "<E>" --yes --only=policy,assetGroup
    ```
    The policy DELETE is an async job; the script waits for COMPLETED, then deletes the asset group.
 2. **User** (MCP): `mcp__usermanagement__delete_user` with the user ID from D2.
+   On an auth error, use `node idmc-segment.mjs delete "<E>" --yes --only=user` instead.
 3. **User group** (REST):
    ```
    node idmc-segment.mjs delete "<E>" --yes --only=userGroup
@@ -170,6 +201,7 @@ Stop at the first failure and report what was already deleted.
 
 ### D4: check and summarize
 - `node idmc-segment.mjs delete "<E>"` should report `Nothing found for segment "<E>"`.
-- `get_user_details` with `q: "userName==Test-U-<E>"` should return `[]`.
+  This covers the user too.
+- MCP user path, optionally: `get_user_details` with `q: "userName==Test-U-<E>"` should return `[]`.
 
 Report a table of the 4 items: name, ID or reference, and Deleted / not found.

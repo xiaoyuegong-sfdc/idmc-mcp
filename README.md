@@ -4,7 +4,8 @@ Claude Code project for Informatica IDMC / CDGC. It contains:
 
 - **Skill `idmc-segregation-test`**: creates or deletes a segregation test entity `<E>` in an IDMC org:
   user group `Test-UG-<E>` (Governance Administrator), root asset group `<E>`, enabled user group
-  policy `Test-UGP-<E>`, and test user `Test-U-<E>`.
+  policy `Test-UGP-<E>`, and test user `Test-U-<E>` (via the `usermanagement` MCP, or via REST
+  when the MCP token is missing or invalid).
 - **Skill `refresh-idmc-token`**: refreshes the two IDMC tokens (see below).
 - The scripts these skills use: `idmc-segment.mjs`, `refresh-token-*.ps1` / `.cmd`.
 
@@ -34,7 +35,8 @@ Once set up, ask Claude things like *"create a segregation test for Dummy 3"*,
    claude mcp add --transport http claire-data-exploration-agent-mcp https://mcp.dm-em.informaticacloud.com/mcp-servers/public/dataexplorationagent --header "Authorization: Bearer x"
    claude mcp add --transport http data-marketplace-order-management https://mcp.dm-em.informaticacloud.com/mcp-servers/public/ordermanagement --header "Authorization: Bearer x"
    ```
-   Only `usermanagement` is needed for the segregation skill. Don't put these servers in a shared
+   Only `usermanagement` is used by the segregation skill, and it is optional there (the skill
+   falls back to REST for the test user). Don't put these servers in a shared
    `.mcp.json`: their tokens are personal.
 3. Double-click `refresh-token-mcp-oauth20.cmd` and enter your OAuth client_id / client_secret.
    This writes the real token into the servers in `%USERPROFILE%\.claude.json`.
@@ -42,7 +44,8 @@ Once set up, ask Claude things like *"create a segregation test for Dummy 3"*,
    typed), or `refresh-token-api-native.cmd` (username + password). It is saved to
    `%USERPROFILE%\.idmc\api-token.json`.
 5. Start `claude` in this folder, run `/mcp`, and check that `usermanagement` is connected.
-6. Check both tokens: `node idmc-segment.mjs check`. It should end with `ORG: MATCH`.
+6. Check both tokens: `node idmc-segment.mjs check`. It should end with `ORG: MATCH`
+   (or `ORG: REST ONLY` if you skip the MCP token).
 
 ## The two tokens: keep them separate
 
@@ -51,8 +54,9 @@ Once set up, ask Claude things like *"create a segregation test for Dummy 3"*,
 | MCP servers | `refresh-token-mcp-oauth20.cmd` (OAuth client credentials) | `%USERPROFILE%\.claude.json` | ~24 h |
 | REST APIs (`idmc-segment.mjs`) | `refresh-token-api-browser.cmd` or `refresh-token-api-native.cmd` | `%USERPROFILE%\.idmc\api-token.json` | JWT ~30 min, re-minted automatically while the IDMC session lives |
 
-Never put a user-login JWT into `.claude.json`. Both tokens must be for the **same org**;
-`idmc-segment.mjs check` verifies this, and the skill refuses to create or delete anything otherwise.
+Never put a user-login JWT into `.claude.json`. When both tokens are valid they must be for the
+**same org**; `idmc-segment.mjs check` verifies this, and the skill refuses to create or delete
+anything otherwise. With only a valid REST API token, everything (including the user) goes via REST.
 No secret is stored in this folder: passwords and client secrets are only prompted.
 
 ## Environment overrides (optional)
@@ -72,6 +76,9 @@ No secret is stored in this folder: passwords and client secrets are only prompt
 
 - `check` exits 3: a token is invalid. Re-run the refresh script it names.
 - `check` exits 4: the tokens are for different orgs. Refresh one of them into the right org.
+- `check` exits 5: the REST API token is fine but the MCP token is missing or invalid. The skill
+  then creates/deletes the test user via REST (`idmc-segment.mjs create "<E>" --email=<address>`,
+  `delete "<E>" --yes`) instead of the `usermanagement` MCP.
 - MCP 401 / "Exception encountered while processing JWT": run `refresh-token-mcp-oauth20.cmd`,
   then `/mcp` → reconnect.
 - 403 `ACCESS_DENIED`: the token is valid, but the user or client lacks privileges in that org.

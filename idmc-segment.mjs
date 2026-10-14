@@ -3,17 +3,20 @@
 //   1. user group         "Test-UG-<segment>"   with the Governance Administrator role
 //   2. asset group        "<segment>"           at the root level, created, then published
 //   3. user group policy  "Test-UGP-<segment>"  all rules scoped to that user group + asset group, created, published, enabled
-// The test user "Test-U-<segment>" is created separately with the usermanagement MCP server
-// (see the idmc-segregation-test skill); "delete" refuses while the user group still has members.
+//   4. user               "Test-U-<segment>"    in that user group; only with --email=<address>
+// The test user is normally created with the usermanagement MCP server (see the
+// idmc-segregation-test skill); --email is the REST fallback when the MCP token is missing or
+// invalid. "delete" refuses while the user group has members other than the test user.
 //
 // Usage:
 //   node idmc-segment.mjs check                     # validate the REST API token and the MCP token
 //   node idmc-segment.mjs plan   "CMC"              # print the names that create would use (JSON)
-//   node idmc-segment.mjs create "CMC"
+//   node idmc-segment.mjs create "CMC"                       # parts 1-3
+//   node idmc-segment.mjs create "CMC" --email=a@b.com       # parts 1-4 (user via REST)
 //   node idmc-segment.mjs delete "CMC"              # dry run: lists what would be deleted
-//   node idmc-segment.mjs delete "CMC"     --yes    # deletes policy -> asset group -> user group
+//   node idmc-segment.mjs delete "CMC"     --yes    # deletes policy -> asset group -> user -> user group
 //   node idmc-segment.mjs delete "CMC"     --yes --only=policy,assetGroup   # just those parts
-//                                                   # (parts: policy, assetGroup, userGroup)
+//                                                   # (parts: policy, assetGroup, user, userGroup)
 //
 // Auth: reads the REST API token file written by refresh-token-api-native.ps1 / refresh-token-api-browser.ps1
 // (%USERPROFILE%\.idmc\api-token.json; NOT the MCP token in .claude.json). Its sessionId is used
@@ -22,7 +25,7 @@
 //
 // Org: taken from the REST API token (its orgId), so the script works in whichever org you
 // logged in to. "check" also reads the org of the MCP token (org_id claim) and exits 4 if the
-// two differ or one is empty. Set IDMC_ORG_ID to pin an org: the script then refuses a REST
+// two differ, or 5 if the MCP token is missing or invalid (then the user is created via REST). Set IDMC_ORG_ID to pin an org: the script then refuses a REST
 // API token for any other org.
 //
 // "create" is idempotent: pieces that already exist (matched by exact name) are reused, and an
@@ -146,6 +149,14 @@ function clients(s) {
     findUserGroup: async name => (await call("GET", `${v3}/userGroups?q=${encodeURIComponent(`userGroupName=="${name}"`)}`, iamH))[0],
     createUserGroup: (name, description, roles) => call("POST", `${v3}/userGroups`, iamH, { name, description, roles }),
     deleteUserGroup: id => call("DELETE", `${v3}/userGroups/${id}`, iamH),
+
+    // v3 admin API: users (REST fallback for the usermanagement MCP)
+    findUser: async name => (await call("GET", `${v3}/users?q=${encodeURIComponent(`userName=="${name}"`)}`, iamH))[0],
+    // No password: IDMC sends the activation email.
+    createUser: (u, email, groupId) => call("POST", `${v3}/users`, iamH, {
+      name: u.name, firstName: u.firstName, lastName: u.lastName, title: u.title, phone: u.phone, email, groups: [groupId] }),
+    addGroupsToUser: (id, groupIds) => call("PUT", `${v3}/users/${id}/addGroups`, iamH, { groups: groupIds }),
+    deleteUser: id => call("DELETE", `${v3}/users/${id}`, iamH),
     roleId: async name => {
       const r = (await call("GET", `${v3}/roles?q=${encodeURIComponent(`roleName=="${name}"`)}`, iamH))[0];
       if (!r) throw new Error(`Role not found: ${name}`);
@@ -199,7 +210,7 @@ function clients(s) {
 }
 
 // --- commands -------------------------------------------------------------------
-async function create(api, seg) {
+async function create(api, seg, email) {
   const n = names(seg);
 
   // 1. user group
@@ -245,31 +256,52 @@ async function create(api, seg) {
   if (status !== "Enabled") throw new Error(`Policy ${polRef} status is ${status}, expected Enabled`);
   log(`Policy ${polRef} is Enabled`);
 
+  // 4. user, only with --email (otherwise the skill creates it with the usermanagement MCP)
+  let user;
+  if (email) {
+    user = await api.findUser(n.user.name);
+    if (user) {
+      log(`User "${user.userName}" already exists (${user.id}), reusing`);
+      if (!user.groups?.some(g => g.id === ug.id)) {
+        await api.addGroupsToUser(user.id, [ug.id]);
+        log(`Added user ${user.id} to user group ${ug.id}`);
+      }
+    } else {
+      user = await api.createUser(n.user, email, ug.id);
+      log(`Created user "${user.userName}" (${user.id}) in user group ${ug.id}; activation email goes to ${email}`);
+    }
+  }
+
   return { segment: seg,
     userGroup: { name: n.userGroup.name, id: ug.id },
     assetGroup: { name: n.assetGroup.name, ref: agRef, id: agId },
-    policy: { name: n.policy.name, ref: polRef, id: polId } };
+    policy: { name: n.policy.name, ref: polRef, id: polId },
+    ...(user && { user: { name: user.userName, id: user.id, email: user.email, state: user.state } }) };
 }
 
-// only: subset of PARTS to delete (default all), so the test user can be deleted
-// (via the usermanagement MCP) between the asset group and the user group.
-const PARTS = ["policy", "assetGroup", "userGroup"];
+// only: subset of PARTS to delete (default all), so the test user can instead be deleted
+// via the usermanagement MCP between the asset group and the user group.
+const PARTS = ["policy", "assetGroup", "user", "userGroup"];
 async function remove(api, seg, confirmed, only = PARTS) {
   const n = names(seg);
   const policies = only.includes("policy") ? await api.findPolicy(n.policy.name) : [];
   const assetGroups = only.includes("assetGroup") ? await api.findAssetGroup(n.assetGroup.name) : [];
+  const user = only.includes("user") ? await api.findUser(n.user.name) : undefined;
   const ug = only.includes("userGroup") ? await api.findUserGroup(n.userGroup.name) : undefined;
 
   const plan = [
     ...policies.map(p => `policy "${n.policy.name}" (${p["core.externalId"]})`),
     ...assetGroups.map(a => `asset group "${n.assetGroup.name}" (${a["core.externalId"]})`),
+    ...(user ? [`user "${user.userName}" (${user.id})`] : []),
     ...(ug ? [`user group "${ug.userGroupName}" (${ug.id}, ${ug.users.length} members)`] : []),
   ];
   if (!plan.length) { log(`Nothing found for segment "${seg}"`); return; }
   log(`Segment "${seg}" contains:\n   - ${plan.join("\n   - ")}`);
   if (!confirmed) { log("Dry run; re-run with --yes to delete"); return; }
-  if (ug?.users.length)
-    throw new Error(`User group "${ug.userGroupName}" still has members (${ug.users.map(u => u.userName).join(", ")}); delete those users first`);
+  // The test user is fine when it is deleted in this run (before the user group).
+  const others = ug?.users.filter(u => u.userName !== user?.userName) || [];
+  if (others.length)
+    throw new Error(`User group "${ug.userGroupName}" still has members (${others.map(u => u.userName).join(", ")}); delete those users first`);
 
   // Policy first: it references the user group and the asset group.
   for (const p of policies) {
@@ -278,14 +310,16 @@ async function remove(api, seg, confirmed, only = PARTS) {
     log(`Deleted policy ${p["core.externalId"]}`);
   }
   for (const a of assetGroups) { await api.deleteAssetGroup(a["core.identity"]); log(`Deleted asset group ${a["core.externalId"]}`); }
+  if (user) { await api.deleteUser(user.id); log(`Deleted user ${user.id}`); }
   if (ug) { await api.deleteUserGroup(ug.id); log(`Deleted user group ${ug.id}`); }
 }
 
 // Validates both tokens with a live call: the REST API token file (v3 + CDGC) and the
 // usermanagement MCP token in .claude.json, then compares their orgs.
-// Exit codes: 0 both valid + same org, 3 a token is not usable, 4 orgs differ or one is empty.
+// Exit codes: 0 both valid + same org, 3 REST API token not usable, 4 orgs differ or one is empty,
+// 5 REST API token valid but MCP token missing/invalid (the user then goes via REST).
 async function check() {
-  let ok = true, restOrg = null, restOrgName = null, mcpOrg = null;
+  let restOk = true, mcpOk = true, restOrg = null, restOrgName = null, mcpOrg = null;
   try {
     const s = await getSession();
     restOrg = s.orgId; restOrgName = s.orgName;
@@ -293,7 +327,7 @@ async function check() {
     await api.roleId(ROLES[0]);                       // v3 admin API with the session id
     await api.findAssetGroup("__token_check__");      // CDGC search with the JWT
     log(`REST API token: VALID - ${s.user}, org "${s.orgName}" (${s.orgId}), JWT expires ${new Date(claimsOf(s.jwt).exp * 1000).toISOString()}`);
-  } catch (e) { ok = false; log(`REST API token: INVALID - ${e.message}`); }
+  } catch (e) { restOk = false; log(`REST API token: INVALID - ${e.message}`); }
 
   try {
     const projects = JSON.parse(readFileSync(CFG.claudeJson, "utf8")).projects || {};
@@ -311,29 +345,36 @@ async function check() {
         params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "idmc-segment-check", version: "1" } } }) });
     if (!r.ok) throw new Error(`usermanagement rejected the token (HTTP ${r.status}); run refresh-token-mcp-oauth20.cmd, then /mcp -> reconnect`);
     log(`MCP token (usermanagement): VALID - client ${c.client_name || c.client_id}, org ${mcpOrg || "(none)"}, expires ${exp}`);
-  } catch (e) { ok = false; log(`MCP token (usermanagement): INVALID - ${e.message}`); }
+  } catch (e) { mcpOk = false; log(`MCP token (usermanagement): INVALID - ${e.message}`); }
 
   // Printed even when a token is invalid, so a refresh can target the right org.
   const same = restOrg && mcpOrg && restOrg === mcpOrg;
-  log(same ? `ORG: MATCH - "${restOrgName}" (${restOrg})`
-           : `ORG: MISMATCH - REST API token org ${restOrg || "(none)"}${restOrgName ? ` "${restOrgName}"` : ""}, MCP token org ${mcpOrg || "(none)"}`);
-  if (!ok) process.exit(3);
+  if (restOk && !mcpOk) log(`ORG: REST ONLY - "${restOrgName}" (${restOrg}); manage the user via REST (create --email, delete)`);
+  else log(same ? `ORG: MATCH - "${restOrgName}" (${restOrg})`
+                : `ORG: MISMATCH - REST API token org ${restOrg || "(none)"}${restOrgName ? ` "${restOrgName}"` : ""}, MCP token org ${mcpOrg || "(none)"}`);
+  if (!restOk) process.exit(3);
+  if (!mcpOk) process.exit(5);
   if (!same) process.exit(4);
 }
 
 // --- CLI ------------------------------------------------------------------------
 const [cmd, seg] = process.argv.slice(2);
 if (!(cmd === "check" || (["plan", "create", "delete"].includes(cmd) && seg))) {
-  console.log('Usage: node idmc-segment.mjs check\n       node idmc-segment.mjs plan|create "<segment>"\n       node idmc-segment.mjs delete "<segment>" [--yes] [--only=policy,assetGroup,userGroup]');
+  console.log('Usage: node idmc-segment.mjs check\n       node idmc-segment.mjs plan "<segment>"\n       node idmc-segment.mjs create "<segment>" [--email=<address>]\n       node idmc-segment.mjs delete "<segment>" [--yes] [--only=policy,assetGroup,user,userGroup]');
   process.exit(2);
 }
 if (cmd === "check") { await check(); process.exit(0); }
 if (cmd === "plan") { console.log(JSON.stringify(names(seg), null, 2)); process.exit(0); }
+const email = process.argv.find(a => a.startsWith("--email="))?.slice(8);
+if (email !== undefined && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+  console.error(`ERROR: not a valid email address: "${email}"`);
+  process.exit(2);
+}
 try {
   const session = await getSession();
   log(`Signed in as ${session.user}, org "${session.orgName}" (${session.orgId})`);
   const api = clients(session);
-  if (cmd === "create") console.log(JSON.stringify(await create(api, seg), null, 2));
+  if (cmd === "create") console.log(JSON.stringify(await create(api, seg, email), null, 2));
   else {
     const only = process.argv.find(a => a.startsWith("--only="))?.slice(7).split(",") || PARTS;
     const bad = only.filter(p => !PARTS.includes(p));
