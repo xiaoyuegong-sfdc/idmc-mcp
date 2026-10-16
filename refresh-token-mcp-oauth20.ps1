@@ -3,7 +3,8 @@
 # (authz-service) and writes it into the Authorization header of each configured
 # IDMC MCP server (all names in $ServerNames) in %USERPROFILE%\.claude.json.
 #
-# This is the ONLY script that writes the MCP servers' token in .claude.json.
+# This writes the token for all MCP servers in .claude.json; refresh-token-mcp-oauth21.ps1
+# writes a per-server user token (OAuth 2.1 + PKCE) into a single server instead.
 # refresh-token-api-native.ps1 / refresh-token-api-browser.ps1 mint the REST API token instead and
 # save it to %USERPROFILE%\.idmc\api-token.json, leaving .claude.json untouched.
 #
@@ -15,46 +16,90 @@
 # MCP servers reports a 401, then /mcp -> reconnect it.
 #
 # The client_secret is prompted securely (never displayed, never stored).
+#
+# The token (never the secret) is also saved to %USERPROFILE%\.idmc\mcp-oauth20-token.json
+# (override IDMC_OAUTH20_TOKEN_FILE). -ApplySaved writes that saved token into the
+# servers again without prompting, e.g. after an OAuth 2.1 token replaced one of them.
+
+param([switch]$ApplySaved)
 
 $ErrorActionPreference = 'Stop'
 
 $LoginUrl    = if ($env:IDMC_LOGIN_URL) { $env:IDMC_LOGIN_URL } else { 'https://dm-em.informaticacloud.com' }
 $ClaudeJson  = if ($env:CLAUDE_JSON)    { $env:CLAUDE_JSON }    else { Join-Path $env:USERPROFILE '.claude.json' }
+$TokenFile   = if ($env:IDMC_OAUTH20_TOKEN_FILE) { $env:IDMC_OAUTH20_TOKEN_FILE } else { Join-Path $env:USERPROFILE '.idmc\mcp-oauth20-token.json' }
 $ServerNames = @('cdgcsearchmetadata','usermanagement','claire-data-exploration-agent-mcp','catalog-discovery','catalog-enrichment','data-marketplace-order-management')
 
-# --- credentials (prompted; nothing stored on disk) ------------------------
-$clientId = Read-Host "IDMC client_id"
-if ([string]::IsNullOrWhiteSpace($clientId)) { throw "client_id is required" }
-$secure   = Read-Host "IDMC client_secret" -AsSecureString
-$bstr     = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-$clientSecret = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-if ([string]::IsNullOrWhiteSpace($clientSecret)) { throw "client_secret is required" }
-
-try {
-    # --- request access token via client_credentials grant -----------------
-    Write-Host ">> Requesting access token from $LoginUrl/authz-service/oauth/token ..."
-    $query = 'grant_type=client_credentials' +
-             '&client_id='     + [Uri]::EscapeDataString($clientId) +
-             '&client_secret=' + [Uri]::EscapeDataString($clientSecret)
-    $tokenResp = Invoke-RestMethod -Method Post `
-        -Uri "$LoginUrl/authz-service/oauth/token?$query"
-
-    # Endpoint may return a raw token string or a JSON wrapper.
-    if ($tokenResp -is [string]) {
-        $token = $tokenResp.Trim()
-    } else {
-        $token = $tokenResp.access_token
-        if (-not $token) { $token = $tokenResp.jwt_token }
-        if (-not $token) { $token = $tokenResp.token }
+if ($ApplySaved) {
+    if (-not (Test-Path $TokenFile)) { throw "No saved token at $TokenFile" }
+    $saved = Get-Content -Raw -Encoding UTF8 $TokenFile | ConvertFrom-Json
+    if ($saved.expiresAt -and [DateTime]$saved.expiresAt -le (Get-Date)) {
+        throw "Saved token expired at $($saved.expiresAt); run the script again without -ApplySaved"
     }
-    $token = ("$token").Trim().Trim('"')
-    if ([string]::IsNullOrWhiteSpace($token)) {
-        throw "No access token in response: $($tokenResp | ConvertTo-Json -Compress)"
+    Write-Host ">> Saved token from $($saved.issuedAt) (expires $($saved.expiresAt))"
+    $token = $saved.access_token
+} else {
+    # --- credentials (prompted; nothing stored on disk) ------------------------
+    $clientId = Read-Host "IDMC client_id"
+    if ([string]::IsNullOrWhiteSpace($clientId)) { throw "client_id is required" }
+    $secure   = Read-Host "IDMC client_secret" -AsSecureString
+    $bstr     = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    $clientSecret = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    if ([string]::IsNullOrWhiteSpace($clientSecret)) { throw "client_secret is required" }
+
+    try {
+        # --- request access token via client_credentials grant -----------------
+        Write-Host ">> Requesting access token from $LoginUrl/authz-service/oauth/token ..."
+        $query = 'grant_type=client_credentials' +
+                 '&client_id='     + [Uri]::EscapeDataString($clientId) +
+                 '&client_secret=' + [Uri]::EscapeDataString($clientSecret)
+        $tokenResp = Invoke-RestMethod -Method Post `
+            -Uri "$LoginUrl/authz-service/oauth/token?$query"
+
+        # Endpoint may return a raw token string or a JSON wrapper.
+        if ($tokenResp -is [string]) {
+            $token = $tokenResp.Trim()
+        } else {
+            $token = $tokenResp.access_token
+            if (-not $token) { $token = $tokenResp.jwt_token }
+            if (-not $token) { $token = $tokenResp.token }
+        }
+        $token = ("$token").Trim().Trim('"')
+        if ([string]::IsNullOrWhiteSpace($token)) {
+            throw "No access token in response: $($tokenResp | ConvertTo-Json -Compress)"
+        }
     }
-}
-finally {
-    $clientSecret = $null  # drop plaintext secret from memory
+    finally {
+        $clientSecret = $null  # drop plaintext secret from memory
+    }
+
+    # --- save the token (not the secret) ---------------------------------------
+    $issued = Get-Date
+    $claims = $null
+    try {
+        $seg = $token.Split('.')[1].Replace('-', '+').Replace('_', '/')
+        $seg += '=' * ((4 - $seg.Length % 4) % 4)
+        $claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($seg)) | ConvertFrom-Json
+    } catch { }  # not a JWT - save without claims
+    $expiresAt = if ($claims.exp) { [DateTimeOffset]::FromUnixTimeSeconds([long]$claims.exp).LocalDateTime.ToString('o') }
+                 elseif ($tokenResp.expires_in) { $issued.AddSeconds([int]$tokenResp.expires_in).ToString('o') }
+                 else { $null }
+    $record = [ordered]@{
+        source       = 'oauth20-client-credentials'
+        loginUrl     = $LoginUrl
+        clientId     = $clientId
+        sub          = $claims.sub
+        orgId        = $claims.org_id
+        audience     = $claims.aud
+        servers      = $ServerNames
+        issuedAt     = $issued.ToString('o')
+        expiresAt    = $expiresAt
+        access_token = $token
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path $TokenFile) | Out-Null
+    [IO.File]::WriteAllText($TokenFile, ($record | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+    Write-Host ">> Saved token to $TokenFile (expires $expiresAt)"
 }
 
 # --- write token into ~/.claude.json ---------------------------------------

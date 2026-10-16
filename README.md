@@ -6,7 +6,8 @@ Claude Code project for Informatica IDMC / CDGC. It contains:
   user group `Test-UG-<E>` (Governance Administrator), root asset group `<E>`, enabled user group
   policy `Test-UGP-<E>`, and test user `Test-U-<E>` (via the `usermanagement` MCP, or via REST
   when the MCP token is missing or invalid).
-- **Skill `refresh-idmc-token`**: refreshes the two IDMC tokens (see below).
+- **Skill `refresh-idmc-token`**: refreshes the IDMC tokens, which are the MCP server token
+  (OAuth 2.0 or OAuth 2.1) and the REST API token (see below).
 - The scripts these skills use: `idmc-segment.mjs`, `refresh-token-*.ps1` / `.cmd`.
 
 Once set up, ask Claude things like *"create a segregation test for Dummy 3"*,
@@ -17,7 +18,9 @@ Once set up, ask Claude things like *"create a segregation test for Dummy 3"*,
 - Windows, with [Claude Code](https://claude.com/claude-code), Node.js 18+, Windows PowerShell 5.1+
   and Microsoft Edge (the browser login uses Edge remote debugging; Chrome's is blocked by corp policy).
 - In the target IDMC org:
-  - an **OAuth client** (client_id / client_secret) for the MCP servers;
+  - an **OAuth client** (client_id / client_secret) for the MCP servers (OAuth 2.0), and/or
+    a **public OAuth client** (client_id only) with redirect URI `http://localhost:9876/callback`
+    registered, for the per-user OAuth 2.1 login;
   - a user login with admin rights (it creates user groups, asset groups, policies and users).
 - Defaults are for the EMEA pod (`dm-em`). For another pod, set `IDMC_POD_URL` / `IDMC_LOGIN_URL`,
   and check the hosts at the top of `idmc-segment.mjs`.
@@ -40,6 +43,8 @@ Once set up, ask Claude things like *"create a segregation test for Dummy 3"*,
    `.mcp.json`: their tokens are personal.
 3. Double-click `refresh-token-mcp-oauth20.cmd` and enter your OAuth client_id / client_secret.
    This writes the real token into the servers in `%USERPROFILE%\.claude.json`.
+   Alternatively, run `refresh-token-mcp-oauth21.cmd` once per server to log in as yourself in the browser
+   (see [OAuth 2.1 login](#oauth-21-login-one-server-as-your-user)).
 4. Get a REST API token: double-click `refresh-token-api-browser.cmd` (Edge login, no password
    typed), or `refresh-token-api-native.cmd` (username + password). It is saved to
    `%USERPROFILE%\.idmc\api-token.json`.
@@ -47,30 +52,71 @@ Once set up, ask Claude things like *"create a segregation test for Dummy 3"*,
 6. Check both tokens: `node idmc-segment.mjs check`. It should end with `ORG: MATCH`
    (or `ORG: REST ONLY` if you skip the MCP token).
 
-## The two tokens: keep them separate
+## The tokens: keep MCP and REST separate
 
 | Token | Script | Stored in | Lifetime |
 |---|---|---|---|
-| MCP servers | `refresh-token-mcp-oauth20.cmd` (OAuth client credentials) | `%USERPROFILE%\.claude.json` | ~24 h |
+| MCP servers (all at once, service principal) | `refresh-token-mcp-oauth20.cmd` (OAuth 2.0 client credentials) | `%USERPROFILE%\.claude.json`; copy in `%USERPROFILE%\.idmc\mcp-oauth20-token.json` | ~24 h |
+| MCP server (one per run, your user) | `refresh-token-mcp-oauth21.cmd` (OAuth 2.1 authorization code + PKCE, browser login) | `%USERPROFILE%\.claude.json`; copy per resource in `%USERPROFILE%\.idmc\mcp-oauth21-token.json` | ~1 h |
 | REST APIs (`idmc-segment.mjs`) | `refresh-token-api-browser.cmd` or `refresh-token-api-native.cmd` | `%USERPROFILE%\.idmc\api-token.json` | JWT ~30 min, re-minted automatically while the IDMC session lives |
 
-Never put a user-login JWT into `.claude.json`. When both tokens are valid they must be for the
+Never put the REST API JWT (`api-token.json`) into `.claude.json`; only the MCP OAuth tokens
+belong there. When the MCP and REST tokens are both valid they must be for the
 **same org**; `idmc-segment.mjs check` verifies this, and the skill refuses to create or delete
 anything otherwise. With only a valid REST API token, everything (including the user) goes via REST.
 No secret is stored in this folder: passwords and client secrets are only prompted.
+
+`.claude.json` is what the MCP servers actually use; the `mcp-oauth2*-token.json` files are a
+record (issued/expiry, org, subject) and the source for `-ApplySaved`, which writes a saved,
+unexpired token back into the servers without a new login or secret, e.g.
+`refresh-token-mcp-oauth20.cmd -ApplySaved` after an OAuth 2.1 token replaced one server's header,
+or `refresh-token-mcp-oauth21.cmd -ApplySaved [-Resource <name>]`. An OAuth 2.1 token is only
+valid for the one server it was minted for (`aud` = that server's URL).
+The OAuth 2.1 record also keeps the `refresh_token`: `refresh-token-mcp-oauth21.cmd -Refresh
+[-Resource <name>]` uses it to get a new access token (no browser, no prompt) once the ~1 h token
+has expired, saves the new tokens and writes the header; then `/mcp` -> reconnect.
+
+## OAuth 2.1 login (one server, as your user)
+
+`refresh-token-mcp-oauth21.cmd` uses the authorization code grant with PKCE (S256). It is a
+public client, so no secret is needed. It prompts for:
+
+| Prompt | Default | Parameter |
+|---|---|---|
+| `baseUrl` | `https://dm-em.informaticacloud.com` (or `IDMC_LOGIN_URL`) | `-BaseUrl` |
+| `client_id` | none | `-ClientId` |
+| `redirect_uri` | `http://localhost:9876/callback` (must be `http` on localhost/127.0.0.1) | `-RedirectUri` |
+| `resource` | none; lists the IDMC MCP servers installed in `.claude.json` to pick by number, or type a name. It is appended to `https://mcp.<baseUrl host>/mcp-servers/public/` | `-Resource` |
+
+The script then:
+1. opens the browser at `<baseUrl>/authz-service/oauth2/authorize` and waits for the login on `redirect_uri`;
+2. sends `POST <baseUrl>/authz-service/oauth2/token` (form-encoded: `grant_type=authorization_code`,
+   `code`, `redirect_uri`, `client_id`, `code_verifier`, `resource`);
+3. saves the response under its resource URL in `%USERPROFILE%\.idmc\mcp-oauth21-token.json`;
+4. writes the token into every server in `.claude.json` with that URL and tells you which one
+   to reconnect in `/mcp`.
+
+The token acts as the logged-in user (not the OAuth app's service principal), so operations
+run with your own IDMC privileges. It lasts ~1 h; renew it without login via `-Refresh`. `-ShowDetails` prints every request and
+response parameter and the token claims (tokens masked). Example without prompts:
+```
+refresh-token-mcp-oauth21.cmd -BaseUrl https://dm-em.informaticacloud.com -ClientId <id> -RedirectUri http://localhost:9876/callback -Resource usermanagement
+```
 
 ## Environment overrides (optional)
 
 | Variable | Used by | Purpose |
 |---|---|---|
 | `IDMC_USER` | `refresh-token-api-native.ps1` | Default username at the prompt |
-| `IDMC_LOGIN_URL` | `refresh-token-api-native.ps1`, `refresh-token-mcp-oauth20.ps1` | Login host (default `https://dm-em.informaticacloud.com`) |
+| `IDMC_LOGIN_URL` | `refresh-token-api-native.ps1`, `refresh-token-mcp-oauth20.ps1`, `refresh-token-mcp-oauth21.ps1` | Login host (default `https://dm-em.informaticacloud.com`; the OAuth 2.1 script prompts with it as default) |
+| `IDMC_OAUTH20_TOKEN_FILE`, `IDMC_OAUTH21_TOKEN_FILE` | `refresh-token-mcp-oauth20.ps1`, `refresh-token-mcp-oauth21.ps1` | Saved MCP token file locations |
 | `IDMC_BROWSER_LOGIN_URL` | `refresh-token-api-browser.ps1` | Default login page (e.g. an SSO URL `.../ma/sso/<orgId>`) |
 | `IDMC_DEBUG_PORT`, `IDMC_PROFILE_DIR`, `IDMC_LOGIN_TIMEOUT`, `IDMC_BROWSER` | `refresh-token-api-browser.ps1` | Edge debug port, profile folder, wait time, browser path |
 | `IDMC_API_TOKEN_FILE` | all REST scripts | REST token file location |
 | `IDMC_ORG_ID` | `idmc-segment.mjs` | Pin to one org; refuses REST tokens from any other org |
 | `IDMC_POD_URL` | `idmc-segment.mjs` | v3 admin API pod (default `https://emw1.dm-em.informaticacloud.com`) |
-| `IDMC_MCP_PROJECT`, `CLAUDE_JSON` | `idmc-segment.mjs` | Where to find the MCP token (default: this folder's entry in `%USERPROFILE%\.claude.json`) |
+| `CLAUDE_JSON` | `idmc-segment.mjs`, `refresh-token-mcp-oauth20.ps1`, `refresh-token-mcp-oauth21.ps1` | Claude config holding the MCP tokens (default `%USERPROFILE%\.claude.json`) |
+| `IDMC_MCP_PROJECT` | `idmc-segment.mjs` | Project entry in that file to read the MCP token from (default: this folder) |
 
 ## Troubleshooting
 
@@ -79,6 +125,20 @@ No secret is stored in this folder: passwords and client secrets are only prompt
 - `check` exits 5: the REST API token is fine but the MCP token is missing or invalid. The skill
   then creates/deletes the test user via REST (`idmc-segment.mjs create "<E>" --email=<address>`,
   `delete "<E>" --yes`) instead of the `usermanagement` MCP.
-- MCP 401 / "Exception encountered while processing JWT": run `refresh-token-mcp-oauth20.cmd`,
-  then `/mcp` → reconnect.
+- MCP 401 / "Exception encountered while processing JWT": run `refresh-token-mcp-oauth20.cmd`
+  (or `-ApplySaved` if the saved token is still valid), or `refresh-token-mcp-oauth21.cmd` for one
+  server, then `/mcp` → reconnect.
+- MCP 401 right after an OAuth 2.1 refresh: the token was minted for another server (`aud`), or it
+  expired (~1 h). Run `refresh-token-mcp-oauth21.cmd -Refresh -Resource <name>` (uses the saved
+  refresh token, no login), mint one for that server, or `-ApplySaved -Resource <name>` if the saved
+  token is still valid. `invalid_grant` on `-Refresh` means the refresh token expired: log in again.
+- MCP "Incompatible auth server: does not support dynamic client registration": the server has no
+  `Authorization` header, so Claude Code tries its own OAuth login, which IDMC does not support.
+  Write a token with one of the MCP scripts (or `-ApplySaved` / `-Refresh`), then `/mcp` → reconnect.
+- Resetting MCP auth: `/mcp` → "Clear authentication" only clears Claude Code's own OAuth login
+  for that server, not the `Authorization` header in `.claude.json`, so an expired header keeps
+  failing. To reset, remove `headers.Authorization` from the project's servers in `.claude.json`
+  (back it up first; the saved tokens in `~/.idmc` stay), then write fresh tokens as above.
+- OAuth 2.1 login fails with a redirect/client error: the `redirect_uri` must exactly match one
+  registered for the client. If port 9876 is in use, register and enter another loopback URI.
 - 403 `ACCESS_DENIED`: the token is valid, but the user or client lacks privileges in that org.

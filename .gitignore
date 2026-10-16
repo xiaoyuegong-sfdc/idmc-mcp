@@ -5,3 +5,4 @@
 .vscode/
 *.bak
 api-token.json
+mcp-oauth2*-token.json

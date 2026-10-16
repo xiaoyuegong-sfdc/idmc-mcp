@@ -86,13 +86,18 @@ Refreshes:
   An expired JWT alone is fine; the script gets a new one while the IDMC session is alive.
 - **MCP token** (`usermanagement` in `~/.claude.json`, used for asset 4) is INVALID: no
   refresh needed, use the REST user path. Only if the user asks to use the MCP anyway:
-  open `cmd //c start "IDMC MCP OAuth refresh" refresh-token-mcp-oauth20.cmd`.
-  The user enters the client_id/secret of the target org's OAuth client in that window,
-  then runs `/mcp` → reconnect `usermanagement`.
+  if a saved MCP token is still valid, re-apply it yourself (`refresh-token-mcp-oauth20.ps1
+  -ApplySaved`, or `refresh-token-mcp-oauth21.ps1 -ApplySaved -Resource usermanagement`; if
+  that one expired but has a refresh token, `refresh-token-mcp-oauth21.ps1 -Refresh -Resource usermanagement`);
+  otherwise open `cmd //c start "IDMC MCP OAuth refresh" refresh-token-mcp-oauth20.cmd`
+  (the user enters the client_id/secret of the target org's OAuth client in that window) or
+  `refresh-token-mcp-oauth21.cmd` (browser login, resource `usermanagement`; the user is
+  then created as the logged-in user). Then the user runs `/mcp` → reconnect `usermanagement`.
+  See the `refresh-idmc-token` skill.
 - Even when the check passes (exit 0), the `mcp__usermanagement__*` tools must be available
   in this session. If they aren't, use the REST user path.
 
-Never put a user-login JWT into `.claude.json` (see the `refresh-idmc-token` skill).
+Never put the REST API (user-login) JWT into `.claude.json` (see the `refresh-idmc-token` skill).
 Re-run `check` after any refresh, and continue only on exit 0 (both VALID, `ORG: MATCH`)
 or exit 5 (REST API token VALID, `ORG: REST ONLY`, REST user path).
 `IDMC_ORG_ID=<id>` is optional: it pins the script to one org and rejects a REST API
