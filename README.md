@@ -6,12 +6,13 @@ Claude Code project for Informatica IDMC / CDGC. It contains:
   user group `Test-UG-<E>` (Governance Administrator), root asset group `<E>`, enabled user group
   policy `Test-UGP-<E>`, and test user `Test-U-<E>` (via the `usermanagement` MCP, or via REST
   when the MCP token is missing or invalid).
-- **Skill `refresh-idmc-token`**: refreshes the IDMC tokens, which are the MCP server token
-  (OAuth 2.0 or OAuth 2.1) and the REST API token (see below).
-- The scripts these skills use: `idmc-segment.mjs`, `refresh-token-*.ps1` / `.cmd`.
+- **Skill `refresh-idmc-token`**: refreshes or invalidates the IDMC tokens, which are the MCP
+  server token (OAuth 2.0 or OAuth 2.1) and the REST API token (see below).
+- The scripts these skills use: `idmc-segment.mjs`, `refresh-token-*.ps1` / `.cmd`,
+  `invalidate-token-mcp.ps1` / `.cmd`, `invalidate-token-api.ps1` / `.cmd`.
 
 Once set up, ask Claude things like *"create a segregation test for Dummy 3"*,
-*"delete the segregation entity CMC"* or *"refresh the IDMC token"*.
+*"delete the segregation entity CMC"*, *"refresh the IDMC token"* or *"invalidate the MCP tokens"*.
 
 ## Requirements
 
@@ -76,6 +77,21 @@ The OAuth 2.1 record also keeps the `refresh_token`: `refresh-token-mcp-oauth21.
 [-Resource <name>]` uses it to get a new access token (no browser, no prompt) once the ~1 h token
 has expired, saves the new tokens and writes the header; then `/mcp` -> reconnect.
 
+## Invalidating tokens
+
+Two scripts remove the stored tokens again, one per kind; neither touches the other kind.
+Both list what they will remove and ask for confirmation (`-Force` skips it, `-WhatIf` only lists).
+
+| Script | Removes | Options |
+|---|---|---|
+| `invalidate-token-mcp.cmd` | For every local MCP server of this project: the `Authorization` header in `.claude.json` and Claude Code's own OAuth login in `.claude\.credentials.json` (what `/mcp` → "Clear authentication" removes); both files are backed up to `*.bak-invalidate-<timestamp>`. Then deletes the saved MCP access and refresh tokens `mcp-oauth20-token.json` and `mcp-oauth21-token.json`. | `-Project <folder>` (default: this folder) |
+| `invalidate-token-api.cmd` | Logs the IDMC session out (`POST <baseUrl>/saas/public/core/v3/logout` with the saved session id, so `idmc-segment.mjs` can no longer re-mint a JWT from it) and deletes `api-token.json`. | `-NoLogout` (only delete the file), `-Profiles` (also delete the Edge login profiles `%TEMP%\idmc-login-edge*`, so the next browser refresh asks for a login) |
+
+The MCP tokens are only deleted locally, not revoked at IDMC: an access token copied elsewhere
+stays valid until it expires. Afterwards the MCP servers fail with "does not support dynamic
+client registration" until you write a new token (`-ApplySaved` / `-Refresh` have nothing left
+to use), and a running Claude Code session keeps its open connections until `/mcp` → reconnect.
+
 ## OAuth 2.1 login (one server, as your user)
 
 `refresh-token-mcp-oauth21.cmd` uses the authorization code grant with PKCE (S256). It is a
@@ -108,14 +124,14 @@ refresh-token-mcp-oauth21.cmd -BaseUrl https://dm-em.informaticacloud.com -Clien
 | Variable | Used by | Purpose |
 |---|---|---|
 | `IDMC_USER` | `refresh-token-api-native.ps1` | Default username at the prompt |
-| `IDMC_LOGIN_URL` | `refresh-token-api-native.ps1`, `refresh-token-mcp-oauth20.ps1`, `refresh-token-mcp-oauth21.ps1` | Login host (default `https://dm-em.informaticacloud.com`; the OAuth 2.1 script prompts with it as default) |
-| `IDMC_OAUTH20_TOKEN_FILE`, `IDMC_OAUTH21_TOKEN_FILE` | `refresh-token-mcp-oauth20.ps1`, `refresh-token-mcp-oauth21.ps1` | Saved MCP token file locations |
+| `IDMC_LOGIN_URL` | `refresh-token-api-native.ps1`, `refresh-token-mcp-oauth20.ps1`, `refresh-token-mcp-oauth21.ps1`, `invalidate-token-api.ps1` | Login host (default `https://dm-em.informaticacloud.com`; the OAuth 2.1 script prompts with it as default; the API invalidation uses it only if the token has no `baseUrl`) |
+| `IDMC_OAUTH20_TOKEN_FILE`, `IDMC_OAUTH21_TOKEN_FILE` | `refresh-token-mcp-oauth20.ps1`, `refresh-token-mcp-oauth21.ps1`, `invalidate-token-mcp.ps1` | Saved MCP token file locations |
 | `IDMC_BROWSER_LOGIN_URL` | `refresh-token-api-browser.ps1` | Default login page (e.g. an SSO URL `.../ma/sso/<orgId>`) |
-| `IDMC_DEBUG_PORT`, `IDMC_PROFILE_DIR`, `IDMC_LOGIN_TIMEOUT`, `IDMC_BROWSER` | `refresh-token-api-browser.ps1` | Edge debug port, profile folder, wait time, browser path |
+| `IDMC_DEBUG_PORT`, `IDMC_PROFILE_DIR`, `IDMC_LOGIN_TIMEOUT`, `IDMC_BROWSER` | `refresh-token-api-browser.ps1` (`IDMC_PROFILE_DIR` also `invalidate-token-api.ps1 -Profiles`) | Edge debug port, profile folder, wait time, browser path |
 | `IDMC_API_TOKEN_FILE` | all REST scripts | REST token file location |
 | `IDMC_ORG_ID` | `idmc-segment.mjs` | Pin to one org; refuses REST tokens from any other org |
 | `IDMC_POD_URL` | `idmc-segment.mjs` | v3 admin API pod (default `https://emw1.dm-em.informaticacloud.com`) |
-| `CLAUDE_JSON` | `idmc-segment.mjs`, `refresh-token-mcp-oauth20.ps1`, `refresh-token-mcp-oauth21.ps1` | Claude config holding the MCP tokens (default `%USERPROFILE%\.claude.json`) |
+| `CLAUDE_JSON` | `idmc-segment.mjs`, `refresh-token-mcp-oauth20.ps1`, `refresh-token-mcp-oauth21.ps1`, `invalidate-token-mcp.ps1` | Claude config holding the MCP tokens (default `%USERPROFILE%\.claude.json`) |
 | `IDMC_MCP_PROJECT` | `idmc-segment.mjs` | Project entry in that file to read the MCP token from (default: this folder) |
 
 ## Troubleshooting
@@ -137,8 +153,8 @@ refresh-token-mcp-oauth21.cmd -BaseUrl https://dm-em.informaticacloud.com -Clien
   Write a token with one of the MCP scripts (or `-ApplySaved` / `-Refresh`), then `/mcp` → reconnect.
 - Resetting MCP auth: `/mcp` → "Clear authentication" only clears Claude Code's own OAuth login
   for that server, not the `Authorization` header in `.claude.json`, so an expired header keeps
-  failing. To reset, remove `headers.Authorization` from the project's servers in `.claude.json`
-  (back it up first; the saved tokens in `~/.idmc` stay), then write fresh tokens as above.
+  failing. Run `invalidate-token-mcp.cmd` (see [Invalidating tokens](#invalidating-tokens)), then
+  write fresh tokens as above.
 - OAuth 2.1 login fails with a redirect/client error: the `redirect_uri` must exactly match one
   registered for the client. If port 9876 is in use, register and enter another loopback URI.
 - 403 `ACCESS_DENIED`: the token is valid, but the user or client lacks privileges in that org.

@@ -1,28 +1,30 @@
 ---
 name: refresh-idmc-token
 description: >-
-  Refresh IDMC tokens. Two separate kinds: (a) the MCP server token in
+  Refresh or invalidate IDMC tokens. Two separate kinds: (a) the MCP server token in
   ~/.claude.json (cdgcsearchmetadata, usermanagement, catalog-*, claire-*,
   data-marketplace-order-management), minted by OAuth 2.0 client credentials (all
   servers) or OAuth 2.1 auth code + PKCE (one server, user identity), with saved
   copies in ~/.idmc/mcp-oauth20-token.json / mcp-oauth21-token.json that can be
   re-applied with -ApplySaved (oauth21 also renews via -Refresh), and (b) the REST API
   token file ~/.idmc/api-token.json used by direct IDMC/CDGC REST calls and
-  idmc-segment.mjs. TRIGGER when an IDMC MCP server fails to connect or returns
+  idmc-segment.mjs; invalidate-token-mcp.ps1 / invalidate-token-api.ps1 remove them
+  again. TRIGGER when an IDMC MCP server fails to connect or returns
   401 / "Exception encountered while processing JWT" / AUTH_HEADER_REJECTED /
   "does not support dynamic client registration", when the user asks to clear
-  MCP authentication, when a REST call or idmc-segment.mjs reports an expired/missing token, or when
-  the user asks to refresh / renew the IDMC token or access token.
+  MCP authentication, when a REST call or idmc-segment.mjs reports an expired/missing token, when
+  the user asks to refresh / renew the IDMC token or access token, or when the user asks to
+  invalidate / remove / delete / log out the MCP or REST API tokens.
 ---
 
-# Refresh IDMC tokens
+# Refresh or invalidate IDMC tokens
 
 There are **two separate tokens, stored in two separate places — never mix them**:
 
-| Purpose | Script | Stored in |
-|---|---|---|
-| **MCP servers** | `refresh-token-mcp-oauth20.ps1` (OAuth 2.0 client-credentials, all servers) or `refresh-token-mcp-oauth21.ps1` (OAuth 2.1 auth code + PKCE, one server, user identity) | `~/.claude.json` → `projects["<project folder, forward slashes>"].mcpServers.<name>.headers.Authorization`; copies in `~/.idmc/mcp-oauth20-token.json` / `~/.idmc/mcp-oauth21-token.json` (per resource) |
-| **REST APIs** (v3 admin, CDGC, `idmc-segment.mjs`) | `refresh-token-api-native.ps1` (password) or `refresh-token-api-browser.ps1` (SSO/browser) | `%USERPROFILE%\.idmc\api-token.json` (override `IDMC_API_TOKEN_FILE`) |
+| Purpose | Refresh script | Invalidate script | Stored in |
+|---|---|---|---|
+| **MCP servers** | `refresh-token-mcp-oauth20.ps1` (OAuth 2.0 client-credentials, all servers) or `refresh-token-mcp-oauth21.ps1` (OAuth 2.1 auth code + PKCE, one server, user identity) | `invalidate-token-mcp.ps1` | `~/.claude.json` → `projects["<project folder, forward slashes>"].mcpServers.<name>.headers.Authorization`; copies in `~/.idmc/mcp-oauth20-token.json` / `~/.idmc/mcp-oauth21-token.json` (per resource) |
+| **REST APIs** (v3 admin, CDGC, `idmc-segment.mjs`) | `refresh-token-api-native.ps1` (password) or `refresh-token-api-browser.ps1` (SSO/browser) | `invalidate-token-api.ps1` | `%USERPROFILE%\.idmc\api-token.json` (override `IDMC_API_TOKEN_FILE`) |
 
 `refresh-token-api-native.ps1` and `refresh-token-api-browser.ps1` never touch `.claude.json`.
 All scripts live in the project root (the folder that holds `.claude/skills`); run them from there.
@@ -51,11 +53,9 @@ All scripts live in the project root (the folder that holds `.claude/skills`); r
 support). Same fix: write a token (step 1 or 2), then reconnect.
 
 **Clearing MCP auth** (user asks to clear/reset authentication): `/mcp` → "Clear authentication"
-only clears Claude Code's own OAuth login, not the header, and only the user can run it. To clear
-the tokens themselves, back up `~/.claude.json` (e.g. `.claude.json.bak-clear-auth-<timestamp>`)
-and delete `headers.Authorization` (and an empty `headers`) from the servers under
-`projects["<project folder>"].mcpServers`; leave user-scope servers and other projects alone and
-keep `~/.idmc`. Both MCP scripts re-create the header when they write a token.
+only clears Claude Code's own OAuth login, not the header, and only the user can run it. Use
+`invalidate-token-mcp.ps1` instead (section C). Both MCP refresh scripts re-create the header
+when they write a token.
 
 ## Important: Claude cannot answer the scripts' prompts
 
@@ -74,6 +74,8 @@ Or the user double-clicks the `.cmd`. Ask the user to tell you when it has finis
 redirect_uri, resource) need a console too: open its `.cmd` the same way, or run it yourself
 with all of `-BaseUrl -ClientId -RedirectUri -Resource` passed (the user still logs in in
 the browser). `-ApplySaved` (both MCP scripts) and `-Refresh` (oauth21) never prompt.
+The invalidate scripts only ask `Proceed? [y/N]`: Claude runs them with `-WhatIf`, shows the
+list, and after the user's go-ahead runs them with `-Force`.
 
 ## A. MCP server token — `refresh-token-mcp-oauth20.ps1`
 Prompts for `client_id` / `client_secret`, then
@@ -147,6 +149,29 @@ Steps for Claude:
 Notes: Chrome is not used — corp policy blocks its debug port. There is no
 `UserProfile` cookie; the session id is `IDS-SESSION`. Overrides: `IDMC_BROWSER`, `IDMC_BROWSER_LOGIN_URL`,
 `IDMC_DEBUG_PORT`, `IDMC_PROFILE_DIR`, `IDMC_LOGIN_TIMEOUT`, `IDMC_API_TOKEN_FILE`.
+
+## C. Invalidating tokens — `invalidate-token-mcp.ps1`, `invalidate-token-api.ps1`
+Each removes one kind only and keeps the other. Always run `-WhatIf` first, show the user what
+will be removed, then (with their go-ahead) run it with `-Force`:
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File invalidate-token-mcp.ps1 -WhatIf
+powershell -NoProfile -ExecutionPolicy Bypass -File invalidate-token-api.ps1 -WhatIf
+```
+- **MCP** (`invalidate-token-mcp.ps1 [-Project <folder>]`): for every local server under
+  `projects["<project folder>"].mcpServers` it deletes `headers.Authorization` (and an empty
+  `headers`) in `~/.claude.json` and Claude Code's own OAuth login (`~/.claude/.credentials.json`
+  → `mcpOAuth`, matched by `serverName`), with backups `*.bak-invalidate-<timestamp>`; then it
+  deletes `~/.idmc/mcp-oauth20-token.json` and `mcp-oauth21-token.json` (access + refresh tokens,
+  so `-ApplySaved` / `-Refresh` have nothing left to use). User-scope servers, other projects and
+  other OAuth logins (figma, slack, …) stay. Deleted locally only, not revoked at IDMC. Afterwards
+  the servers fail with "does not support dynamic client registration" until a new token is
+  written (A or A2) and the user reconnects them via `/mcp`.
+- **REST** (`invalidate-token-api.ps1 [-NoLogout] [-Profiles]`): logs the session out
+  (`POST <baseUrl>/saas/public/core/v3/logout`, header `INFA-SESSION-ID`; the endpoint is on the
+  login host, the `emw1` pod answers 404; an expired session answers 401 and is skipped) and
+  deletes `api-token.json`. `-Profiles` also deletes the Edge login profiles
+  `%TEMP%\idmc-login-edge*` (forgets the SSO login; Edge must not be using them). Logging out a
+  browser token's session also logs out that Edge profile.
 
 ## Gotchas
 - A 403 `ACCESS_DENIED` is a privilege problem, not a token problem — don't re-refresh.
