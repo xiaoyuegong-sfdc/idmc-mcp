@@ -92,6 +92,46 @@ stays valid until it expires. Afterwards the MCP servers fail with "does not sup
 client registration" until you write a new token (`-ApplySaved` / `-Refresh` have nothing left
 to use), and a running Claude Code session keeps its open connections until `/mcp` → reconnect.
 
+## OAuth 2.0 client credentials (all servers, service principal)
+
+`refresh-token-mcp-oauth20.cmd` uses the OAuth 2.0 client credentials grant. It prompts for
+`client_id` and `client_secret` (the secret is read securely, never displayed or stored) and
+uses the login host `https://dm-em.informaticacloud.com` (or `IDMC_LOGIN_URL`). The token
+acts as the OAuth app's service principal, not as a user, and is written into every IDMC MCP
+server in `.claude.json` (`cdgcsearchmetadata`, `usermanagement`,
+`claire-data-exploration-agent-mcp`, `catalog-discovery`, `catalog-enrichment`,
+`data-marketplace-order-management`).
+
+### API call
+
+It makes one call, with no browser, no PKCE, no `scope` and no `resource`. Unlike the OAuth 2.1
+script, it uses the `/oauth/token` path (not `/oauth2/token`), and the parameters go in the
+**query string**, not in a form body:
+```http
+POST https://dm-em.informaticacloud.com/authz-service/oauth/token?grant_type=client_credentials&client_id=<client_id>&client_secret=<client_secret>
+```
+(no request body; `client_id` and `client_secret` are URL-encoded)
+
+curl equivalent:
+```bash
+curl -X POST -G "https://dm-em.informaticacloud.com/authz-service/oauth/token" \
+  --data-urlencode "grant_type=client_credentials" \
+  --data-urlencode "client_id=$CLIENT_ID" \
+  --data-urlencode "client_secret=$CLIENT_SECRET"
+```
+The script accepts either a raw token string or JSON, and takes the token from the first field
+it finds of `access_token`, `jwt_token` or `token`. It then:
+1. decodes the JWT claims to get `sub`, `org_id`, `aud` and the expiry (`exp`, falling back to
+   `expires_in`);
+2. saves the token (never the secret) with those claims to
+   `%USERPROFILE%\.idmc\mcp-oauth20-token.json`;
+3. sets `Authorization: Bearer <token>` on every server above in `.claude.json` (it backs up
+   `.claude.json.bak` the first time). Then reconnect the servers in `/mcp`.
+
+The grant returns no refresh token, so there is no `-Refresh`: when the token expires, run the
+script again. `-ApplySaved` makes no API call; it writes the saved token back into the servers
+as long as it has not expired.
+
 ## OAuth 2.1 login (one server, as your user)
 
 `refresh-token-mcp-oauth21.cmd` uses the authorization code grant with PKCE (S256). It is a
@@ -118,6 +158,69 @@ response parameter and the token claims (tokens masked). Example without prompts
 ```
 refresh-token-mcp-oauth21.cmd -BaseUrl https://dm-em.informaticacloud.com -ClientId <id> -RedirectUri http://localhost:9876/callback -Resource usermanagement
 ```
+
+### API calls
+
+All values below use the default `baseUrl`; `<resource>` is the full MCP resource URL
+`https://mcp.dm-em.informaticacloud.com/mcp-servers/public/<server name>`.
+
+**1. Authorize (browser).** The script generates a random 32-byte `code_verifier` (base64url,
+43 chars), `code_challenge = BASE64URL(SHA256(code_verifier))` and a GUID `state`, then opens:
+```
+GET https://dm-em.informaticacloud.com/authz-service/oauth2/authorize
+    ?response_type=code
+    &client_id=<client_id>
+    &redirect_uri=http://localhost:9876/callback
+    &scope=mcp:tools:read mcp:tools:write mcp:tools:execute
+    &state=<guid>
+    &code_challenge=<code_challenge>
+    &code_challenge_method=S256
+    &resource=<resource>
+```
+After login, IDMC redirects to `redirect_uri?code=...&state=...`. The local listener checks
+that `state` matches and takes the `code`.
+
+**2. Token exchange.** This is the call that returns the access token (public client, no secret;
+the `code_verifier` proves the caller started the login):
+```http
+POST https://dm-em.informaticacloud.com/authz-service/oauth2/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code
+&code=<code from the callback>
+&redirect_uri=http://localhost:9876/callback
+&client_id=<client_id>
+&code_verifier=<code_verifier>
+&resource=<resource>
+```
+curl equivalent:
+```bash
+curl -X POST "https://dm-em.informaticacloud.com/authz-service/oauth2/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode "grant_type=authorization_code" \
+  --data-urlencode "code=$CODE" \
+  --data-urlencode "redirect_uri=http://localhost:9876/callback" \
+  --data-urlencode "client_id=$CLIENT_ID" \
+  --data-urlencode "code_verifier=$CODE_VERIFIER" \
+  --data-urlencode "resource=https://mcp.dm-em.informaticacloud.com/mcp-servers/public/$SERVER"
+```
+The response holds `access_token`, `token_type`, `expires_in`, `scope` and optionally
+`refresh_token`. The script saves it and sets `Authorization: Bearer <access_token>` on the
+matching MCP servers in `.claude.json`.
+
+**3. Refresh (`-Refresh`).** No browser; same endpoint, using the saved record:
+```http
+POST https://dm-em.informaticacloud.com/authz-service/oauth2/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=refresh_token
+&refresh_token=<saved refresh_token>
+&client_id=<saved clientId>
+&resource=<resource>
+```
+A rotated `refresh_token` in the response replaces the saved one; if none is returned the old
+one is kept. `invalid_grant` means the refresh token expired or was revoked, so log in again
+without `-Refresh`.
 
 ## Environment overrides (optional)
 
