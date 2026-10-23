@@ -180,6 +180,23 @@ GET https://dm-em.informaticacloud.com/authz-service/oauth2/authorize
 After login, IDMC redirects to `redirect_uri?code=...&state=...`. The local listener checks
 that `state` matches and takes the `code`.
 
+Example values (made the same way as the script; for illustration only, never reuse them in a
+real login):
+
+| Parameter | Value |
+|---|---|
+| `code_verifier` | `jv-1RzhKUY5gR3jhN_KgXlpLgNTDITXDI_GKytquJ3g` (43 chars) |
+| `code_challenge` | `mGD7Y7gs8Y7BOwVj-KenS_unqMpXHECPM-IA60WdTfk` = BASE64URL(SHA256(code_verifier)) |
+| `state` | `84917780-5577-4095-a7fc-71d22d93b856` |
+
+`code_challenge` and `state` go into the authorize URL above
+(`...&state=84917780-5577-4095-a7fc-71d22d93b856&code_challenge=mGD7Y7gs8Y7BOwVj-KenS_unqMpXHECPM-IA60WdTfk&code_challenge_method=S256...`);
+the callback must return the same `state`, and `code_verifier` is sent only in the token
+exchange below. To make a fresh set:
+```bash
+node -e "const c=require('crypto');const v=c.randomBytes(32).toString('base64url');console.log(v, c.createHash('sha256').update(v).digest('base64url'), c.randomUUID())"
+```
+
 **2. Token exchange.** This is the call that returns the access token (public client, no secret;
 the `code_verifier` proves the caller started the login):
 ```http
