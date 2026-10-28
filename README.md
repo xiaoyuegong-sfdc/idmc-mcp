@@ -45,7 +45,9 @@ Once set up, ask Claude things like *"create a segregation test for Dummy 3"*,
 3. Double-click `refresh-token-mcp-oauth20.cmd` and enter your OAuth client_id / client_secret.
    This writes the real token into the servers in `%USERPROFILE%\.claude.json`.
    Alternatively, run `refresh-token-mcp-oauth21.cmd` once per server to log in as yourself in the browser
-   (see [OAuth 2.1 login](#oauth-21-login-one-server-as-your-user)).
+   (see [OAuth 2.1 login](#oauth-21-login-one-server-as-your-user)), or add the server through
+   mcp-remote, which handles the OAuth 2.1 login itself (see
+   [Adding an MCP server with OAuth 2.1 directly](#adding-an-mcp-server-with-oauth-21-directly-mcp-remote)).
 4. Get a REST API token: double-click `refresh-token-api-browser.cmd` (Edge login, no password
    typed), or `refresh-token-api-native.cmd` (username + password). It is saved to
    `%USERPROFILE%\.idmc\api-token.json`.
@@ -239,6 +241,78 @@ A rotated `refresh_token` in the response replaces the saved one; if none is ret
 one is kept. `invalid_grant` means the refresh token expired or was revoked, so log in again
 without `-Refresh`.
 
+## Adding an MCP server with OAuth 2.1 directly (mcp-remote)
+
+The most direct way to add an IDMC MCP server with OAuth 2.1 is to put it straight into
+`%USERPROFILE%\.claude.json` as a `stdio` server that runs
+[`mcp-remote`](https://www.npmjs.com/package/mcp-remote). mcp-remote does the authorization
+code + PKCE login in the browser and refreshes the token itself, so no refresh script and no
+`Authorization` header are needed. Two examples:
+
+```json
+"mcpServers": {
+  "address-verification": {
+    "type": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "mcp-remote",
+      "https://mcp.dm-em.informaticacloud.com/mcp-servers/public/dqverifyaddress",
+      "9877",
+      "--host",
+      "localhost",
+      "--callback-path",
+      "/callback",
+      "--static-oauth-client-info",
+      "{\"client_id\":\"9jgZ8uzPSPYhx4g85D43Kt\"}"
+    ]
+  },
+  "cdgc-metadata-search": {
+    "type": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "mcp-remote",
+      "https://mcp.dm-em.informaticacloud.com/mcp-servers/public/cdgcsearchmetadata",
+      "9877",
+      "--host",
+      "localhost",
+      "--callback-path",
+      "/callback",
+      "--static-oauth-client-info",
+      "{\"client_id\":\"9jgZ8uzPSPYhx4g85D43Kt\"}"
+    ]
+  }
+}
+```
+
+For local scope (only this project), put the block under
+`"projects" -> "<this folder, e.g. C:/work/idmc-mcp>" -> "mcpServers"`. The top-level
+`"mcpServers"` is user scope (all projects). Back up `.claude.json` first, and restart Claude Code
+or run `/mcp` after the change.
+
+The arguments:
+
+| Argument | Meaning |
+|---|---|
+| `https://mcp.dm-em.informaticacloud.com/mcp-servers/public/<server>` | The MCP server URL; mcp-remote uses it as the OAuth `resource` |
+| `9877` | Local port of the OAuth callback listener |
+| `--host localhost`, `--callback-path /callback` | Host and path of the callback |
+| `--static-oauth-client-info {"client_id":"..."}` | The public OAuth client registered in IDMC (IDMC has no dynamic client registration, so the client must be given) |
+
+**The callback URL must match the redirect URI configured for that MCP client in IDMC.**
+mcp-remote builds it as `http://<host>:<port><callback-path>`, here
+`http://localhost:9877/callback`. IDMC compares it as an exact string (error `AUTHZ_014` on a
+mismatch), so `127.0.0.1` instead of `localhost`, another port or another path all fail. Always
+pass `--host` and `--callback-path`: on Windows, mcp-remote 0.15.x otherwise uses `127.0.0.1` and
+`/oauth/callback`. Several servers can share one client and one callback port, as in the
+examples.
+
+The first connect opens the browser for the IDMC login. mcp-remote stores the tokens in
+`%USERPROFILE%\.mcp-auth\mcp-remote-v1\<md5 of the server URL>_tokens.json` (not in
+`.claude.json` or `.idmc`) and reuses and refreshes them on later connects. To log in again,
+delete that server's files in this folder.
+
 ## Environment overrides (optional)
 
 | Variable | Used by | Purpose |
@@ -277,4 +351,12 @@ without `-Refresh`.
   write fresh tokens as above.
 - OAuth 2.1 login fails with a redirect/client error: the `redirect_uri` must exactly match one
   registered for the client. If port 9876 is in use, register and enter another loopback URI.
+- mcp-remote server (see [Adding an MCP server with OAuth 2.1 directly](#adding-an-mcp-server-with-oauth-21-directly-mcp-remote))
+  fails with "connection timed out after 30000ms": the first browser login usually takes longer
+  than Claude Code's connect timeout. The mcp-remote left over from that attempt keeps the callback
+  port, so later reconnects time out as well. Stop the stale `node` processes whose command line
+  contains `mcp-remote` and that server's URL, then run the same command once in a terminal
+  (in Git Bash prefix `MSYS_NO_PATHCONV=1`, or `/callback` is turned into a Windows path) and log
+  in. When it prints "Proxy established successfully", stop it with Ctrl+C and reconnect in `/mcp`.
+  Log in one server at a time when several share a callback port.
 - 403 `ACCESS_DENIED`: the token is valid, but the user or client lacks privileges in that org.
